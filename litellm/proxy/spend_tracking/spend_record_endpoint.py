@@ -18,6 +18,7 @@ from litellm.proxy._types import (
     UserAPIKeyAuth,
 )
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
+from litellm.types.utils import ImageObject, ImageResponse
 
 if TYPE_CHECKING:
     from litellm.proxy.proxy_server import PrismaClient
@@ -26,6 +27,13 @@ else:
 
 router = APIRouter()
 
+_IMAGE_CALL_TYPES = {
+    "image_generation",
+    "aimage_generation",
+    "image_edit",
+    "aimage_edit",
+}
+
 
 def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
     """Return the spend for a record, using caller-provided value or computing via completion_cost()."""
@@ -33,13 +41,35 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
         return record.spend
 
     try:
+        completion_response: Any = None
+
+        if record.call_type in _IMAGE_CALL_TYPES:
+            # Build a synthetic ImageResponse so completion_cost's isinstance check passes
+            n = record.n or 1
+            completion_response = ImageResponse(
+                created=0,
+                data=[ImageObject(url="placeholder") for _ in range(n)],
+            )
+            if record.size:
+                completion_response.size = record.size
+            if record.quality:
+                completion_response.quality = record.quality
+        else:
+            # Build a dict with usage info for token-based calls
+            completion_response = {
+                "usage": {
+                    "prompt_tokens": record.prompt_tokens,
+                    "completion_tokens": record.completion_tokens,
+                    "total_tokens": record.total_tokens,
+                },
+                "model": record.model,
+            }
+
         cost = completion_cost(
+            completion_response=completion_response,
             model=record.model,
             custom_llm_provider=record.custom_llm_provider,
             call_type=record.call_type,
-            prompt_tokens=record.prompt_tokens,
-            completion_tokens=record.completion_tokens,
-            total_time=0.0,
             size=record.size,
             quality=record.quality,
             n=record.n,

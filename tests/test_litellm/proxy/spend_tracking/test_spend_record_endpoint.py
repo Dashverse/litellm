@@ -59,7 +59,19 @@ def _make_auth(**overrides) -> UserAPIKeyAuth:
 
 
 def test_cost_calculation_text_completion():
-    """Text model cost should be > 0 when completion_cost succeeds."""
+    """Text model cost should be > 0 when tokens are provided and model is in cost map."""
+    record = _make_record(
+        model="gpt-4",
+        custom_llm_provider="openai",
+        prompt_tokens=100,
+        completion_tokens=50,
+    )
+    cost = _calculate_cost_for_record(record)
+    assert cost > 0, f"Expected non-zero cost for gpt-4, got {cost}"
+
+
+def test_cost_calculation_builds_completion_response():
+    """Verify completion_cost receives a completion_response dict with usage."""
     record = _make_record(prompt_tokens=100, completion_tokens=50)
     with patch(
         "litellm.proxy.spend_tracking.spend_record_endpoint.completion_cost",
@@ -68,10 +80,17 @@ def test_cost_calculation_text_completion():
         cost = _calculate_cost_for_record(record)
         assert cost == 0.0045
         mock_cc.assert_called_once()
+        call_kwargs = mock_cc.call_args.kwargs
+        # Verify completion_response was built with usage
+        cr = call_kwargs["completion_response"]
+        assert cr["usage"]["prompt_tokens"] == 100
+        assert cr["usage"]["completion_tokens"] == 50
 
 
-def test_cost_calculation_image_gen_fal():
-    """FAL image model cost uses size/quality/n params."""
+def test_cost_calculation_image_gen_builds_image_response():
+    """Image generation should build an ImageResponse for completion_cost."""
+    from litellm.types.utils import ImageResponse
+
     record = _make_record(
         model="fal_ai/flux-2/klein/9b",
         call_type="image_generation",
@@ -84,15 +103,45 @@ def test_cost_calculation_image_gen_fal():
     )
     with patch(
         "litellm.proxy.spend_tracking.spend_record_endpoint.completion_cost",
-        return_value=0.003,
+        return_value=0.01,
     ) as mock_cc:
         cost = _calculate_cost_for_record(record)
-        assert cost == 0.003
-        # Verify image-gen params forwarded
-        call_kwargs = mock_cc.call_args
-        assert call_kwargs.kwargs["size"] == "1024x1024"
-        assert call_kwargs.kwargs["n"] == 1
-        assert call_kwargs.kwargs["call_type"] == "image_generation"
+        assert cost == 0.01
+        call_kwargs = mock_cc.call_args.kwargs
+        # Verify an ImageResponse was built
+        cr = call_kwargs["completion_response"]
+        assert isinstance(cr, ImageResponse)
+        assert len(cr.data) == 1
+        assert call_kwargs["size"] == "1024x1024"
+        assert call_kwargs["call_type"] == "image_generation"
+
+
+def test_cost_calculation_fal_image_real():
+    """FAL image model cost should be > 0 using real completion_cost with local cost map."""
+    import litellm
+
+    # Ensure our custom model is in the cost map (it's in the local backup but
+    # may not be in the remote upstream map fetched at import time)
+    if "fal_ai/flux-2/klein/9b" not in litellm.model_cost:
+        litellm.model_cost["fal_ai/flux-2/klein/9b"] = {
+            "litellm_provider": "fal_ai",
+            "mode": "image_generation",
+            "pricing_basis": "PER_MEGAPIXEL",
+            "output_cost_per_megapixel": 0.01,
+            "output_cost_per_image": 0.01,
+        }
+    record = _make_record(
+        model="fal_ai/flux-2/klein/9b",
+        call_type="image_generation",
+        custom_llm_provider="fal_ai",
+        n=1,
+        size="1024x1024",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+    )
+    cost = _calculate_cost_for_record(record)
+    assert cost > 0, f"Expected non-zero cost for fal_ai/flux-2/klein/9b, got {cost}"
 
 
 def test_caller_provided_spend():
@@ -104,13 +153,12 @@ def test_caller_provided_spend():
 
 def test_unknown_model_zero_cost():
     """Unrecognized model returns spend=0.0, no exception."""
-    record = _make_record(model="unknown/nonexistent-model-xyz")
-    with patch(
-        "litellm.proxy.spend_tracking.spend_record_endpoint.completion_cost",
-        side_effect=Exception("Model not found"),
-    ):
-        cost = _calculate_cost_for_record(record)
-        assert cost == 0.0
+    record = _make_record(
+        model="unknown/nonexistent-model-xyz",
+        custom_llm_provider="unknown",
+    )
+    cost = _calculate_cost_for_record(record)
+    assert cost == 0.0
 
 
 # ---------------------------------------------------------------------------
