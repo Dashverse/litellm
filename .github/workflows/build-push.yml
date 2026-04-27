@@ -1,7 +1,7 @@
 name: Build and Push LiteLLM Image
 on:
   push:
-    branches: [main, fix/*, feat/*]
+    branches: [main, fix/*]
   pull_request:
     branches: [main]
   workflow_dispatch:
