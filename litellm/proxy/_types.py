@@ -3337,6 +3337,50 @@ class SpendLogsPayload(TypedDict):
     status: Literal["success", "failure"]
 
 
+class SpendRecordRequest(LiteLLMPydanticObjectBase):
+    """Record an externally-completed inference result for cost tracking."""
+
+    # Required
+    request_id: str
+    model: str
+    call_type: str  # "completion", "image_generation", etc.
+    custom_llm_provider: str  # "fal_ai", "vertex_ai", "openai"
+    startTime: str  # ISO 8601
+    endTime: str  # ISO 8601
+
+    # Token-based calls
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    # Image generation calls
+    size: Optional[str] = None
+    quality: Optional[str] = None
+    n: Optional[int] = None
+
+    # Full request & response bodies (stored for log viewer, used for cost calc)
+    request: Optional[Union[str, list, dict]] = None
+    response: Optional[Union[str, list, dict]] = None
+
+    # Optional metadata
+    api_base: Optional[str] = None
+    end_user: Optional[str] = None
+    request_tags: Optional[List[str]] = None
+    metadata: Optional[dict] = None
+    cache_hit: bool = False
+    status: str = "success"
+
+    # Caller-provided cost (skips LiteLLM calculation)
+    spend: Optional[float] = None
+
+
+class SpendRecordResponse(LiteLLMPydanticObjectBase):
+    request_id: str
+    spend: float
+    model: str
+    recorded: bool
+
+
 class SpanAttributes(str, enum.Enum):
     # Note: We've taken this from opentelemetry-semantic-conventions-ai
     # I chose to not add a new dependency to litellm for this
