@@ -72,7 +72,8 @@ def _build_spend_log_payload(
     team_alias = getattr(user_api_key_dict, "team_alias", None)
 
     # Serialize request and response for storage
-    messages_value: Any = None
+    # Default to "{}" (not None) — Prisma's create_many rejects None for Json? fields
+    messages_value: Any = "{}"
     if record.request is not None:
         messages_value = (
             json.dumps(record.request)
@@ -80,7 +81,7 @@ def _build_spend_log_payload(
             else record.request
         )
 
-    response_value: Any = None
+    response_value: Any = "{}"
     if record.response is not None:
         response_value = (
             json.dumps(record.response)
@@ -88,7 +89,7 @@ def _build_spend_log_payload(
             else record.response
         )
 
-    proxy_server_request_value: Optional[str] = None
+    proxy_server_request_value: Optional[str] = "{}"
     if record.request is not None:
         proxy_server_request_value = (
             json.dumps(record.request)

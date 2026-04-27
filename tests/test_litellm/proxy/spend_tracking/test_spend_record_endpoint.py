@@ -194,14 +194,14 @@ def test_request_response_stored():
 
 
 def test_payload_none_request_response():
-    """When request/response are None, payload fields are None."""
+    """When request/response are None, payload fields default to '{}' for Prisma compatibility."""
     record = _make_record(request=None, response=None)
     auth = _make_auth()
     payload = _build_spend_log_payload(record, 0.01, auth)
 
-    assert payload["messages"] is None
-    assert payload["response"] is None
-    assert payload["proxy_server_request"] is None
+    assert payload["messages"] == "{}"
+    assert payload["response"] == "{}"
+    assert payload["proxy_server_request"] == "{}"
 
 
 # ---------------------------------------------------------------------------
