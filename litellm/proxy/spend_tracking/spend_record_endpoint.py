@@ -34,11 +34,82 @@ _IMAGE_CALL_TYPES = {
     "aimage_edit",
 }
 
+# Map FAL named image sizes to pixel dimensions
+_FAL_SIZE_MAP = {
+    "square_hd": "1024x1024",
+    "square": "512x512",
+    "landscape_4_3": "1280x960",
+    "landscape_16_9": "1792x1024",
+    "portrait_4_3": "960x1280",
+    "portrait_16_9": "1024x1792",
+}
+
+
+def _enrich_record_from_payloads(record: SpendRecordRequest) -> None:
+    """Extract tokens, n, size, quality from request/response bodies when not set explicitly.
+
+    Mutates the record in-place so _calculate_cost_for_record can use the enriched fields.
+    Handles response formats from OpenAI/Gemini, FAL, SimpliSmart, BytePlus, etc.
+    """
+    req = record.request if isinstance(record.request, dict) else {}
+    resp = record.response if isinstance(record.response, dict) else {}
+
+    # --- Tokens from response.usage ---
+    if record.prompt_tokens == 0 and record.completion_tokens == 0:
+        usage = resp.get("usage") or {}
+        if isinstance(usage, dict) and usage:
+            record.prompt_tokens = usage.get("prompt_tokens", 0) or 0
+            record.completion_tokens = usage.get("completion_tokens", 0) or 0
+            record.total_tokens = usage.get("total_tokens", 0) or (
+                record.prompt_tokens + record.completion_tokens
+            )
+
+    # --- Image count (n) from response ---
+    if record.n is None and record.call_type in _IMAGE_CALL_TYPES:
+        data = resp.get("data")
+        if isinstance(data, list) and data:
+            record.n = len(data)
+        else:
+            # FAL direct responses use "images" key
+            images = resp.get("images")
+            if isinstance(images, list) and images:
+                record.n = len(images)
+        # Default to 1 for image gen if still unset
+        if record.n is None:
+            record.n = 1
+
+    # --- Size from request body ---
+    if record.size is None:
+        # OpenAI/standard format
+        size_val = req.get("size")
+        if size_val:
+            record.size = str(size_val)
+        else:
+            # FAL named size format (e.g., "square_hd", "landscape_16_9")
+            image_size = req.get("image_size")
+            if image_size:
+                record.size = _FAL_SIZE_MAP.get(str(image_size), str(image_size))
+            else:
+                # Width/height format (SimpliSmart, BytePlus, etc.)
+                w = req.get("width")
+                h = req.get("height")
+                if w and h:
+                    record.size = f"{w}x{h}"
+
+    # --- Quality from request ---
+    if record.quality is None:
+        quality_val = req.get("quality")
+        if quality_val:
+            record.quality = str(quality_val)
+
 
 def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
     """Return the spend for a record, using caller-provided value or computing via completion_cost()."""
     if record.spend is not None:
         return record.spend
+
+    # Enrich record fields from raw request/response payloads
+    _enrich_record_from_payloads(record)
 
     try:
         completion_response: Any = None

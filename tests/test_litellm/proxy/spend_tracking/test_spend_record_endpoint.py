@@ -15,6 +15,7 @@ from litellm.proxy._types import (
 from litellm.proxy.spend_tracking.spend_record_endpoint import (
     _build_spend_log_payload,
     _calculate_cost_for_record,
+    _enrich_record_from_payloads,
     _is_duplicate_request_id,
 )
 
@@ -159,6 +160,213 @@ def test_unknown_model_zero_cost():
     )
     cost = _calculate_cost_for_record(record)
     assert cost == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Payload enrichment tests (_enrich_record_from_payloads)
+# ---------------------------------------------------------------------------
+
+
+def test_enrich_tokens_from_response_usage():
+    """Tokens extracted from response.usage when not provided explicitly."""
+    record = _make_record(
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        response={
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 200,
+                "total_tokens": 700,
+            },
+            "choices": [{"message": {"content": "hello"}}],
+        },
+    )
+    _enrich_record_from_payloads(record)
+    assert record.prompt_tokens == 500
+    assert record.completion_tokens == 200
+    assert record.total_tokens == 700
+
+
+def test_enrich_tokens_not_overwritten():
+    """Explicit tokens are not overwritten by response.usage."""
+    record = _make_record(
+        prompt_tokens=100,
+        completion_tokens=50,
+        total_tokens=150,
+        response={"usage": {"prompt_tokens": 999, "completion_tokens": 888}},
+    )
+    _enrich_record_from_payloads(record)
+    assert record.prompt_tokens == 100
+    assert record.completion_tokens == 50
+
+
+def test_enrich_n_from_response_data():
+    """Image count extracted from response.data list."""
+    record = _make_record(
+        call_type="image_generation",
+        n=None,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        response={"data": [{"url": "a.png"}, {"url": "b.png"}]},
+    )
+    _enrich_record_from_payloads(record)
+    assert record.n == 2
+
+
+def test_enrich_n_from_response_images():
+    """Image count extracted from FAL-style response.images list."""
+    record = _make_record(
+        call_type="image_generation",
+        n=None,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        response={"images": [{"url": "a.png", "width": 1024, "height": 1024}]},
+    )
+    _enrich_record_from_payloads(record)
+    assert record.n == 1
+
+
+def test_enrich_n_defaults_to_1_for_images():
+    """Image gen with no data/images in response defaults n=1."""
+    record = _make_record(
+        call_type="image_generation",
+        n=None,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        response={"status": "success"},
+    )
+    _enrich_record_from_payloads(record)
+    assert record.n == 1
+
+
+def test_enrich_n_not_set_for_completion():
+    """Non-image call types don't get n set."""
+    record = _make_record(
+        call_type="completion",
+        n=None,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+    )
+    _enrich_record_from_payloads(record)
+    assert record.n is None
+
+
+def test_enrich_size_from_request():
+    """Size extracted from request.size (OpenAI format)."""
+    record = _make_record(
+        size=None,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        request={"prompt": "cat", "size": "1024x1024"},
+    )
+    _enrich_record_from_payloads(record)
+    assert record.size == "1024x1024"
+
+
+def test_enrich_size_from_fal_image_size():
+    """Size extracted from FAL request.image_size and mapped to pixels."""
+    record = _make_record(
+        size=None,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        request={"prompt": "cat", "image_size": "square_hd"},
+    )
+    _enrich_record_from_payloads(record)
+    assert record.size == "1024x1024"
+
+
+def test_enrich_size_from_width_height():
+    """Size extracted from request.width/height (SimpliSmart/BytePlus)."""
+    record = _make_record(
+        size=None,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        request={"prompt": "cat", "width": 768, "height": 1024},
+    )
+    _enrich_record_from_payloads(record)
+    assert record.size == "768x1024"
+
+
+def test_enrich_quality_from_request():
+    """Quality extracted from request.quality."""
+    record = _make_record(
+        quality=None,
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        request={"prompt": "cat", "quality": "hd"},
+    )
+    _enrich_record_from_payloads(record)
+    assert record.quality == "hd"
+
+
+def test_enrich_no_payloads():
+    """Enrichment is a no-op when request/response are None."""
+    record = _make_record(
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        request=None,
+        response=None,
+    )
+    _enrich_record_from_payloads(record)
+    assert record.prompt_tokens == 0
+    assert record.n is None
+    assert record.size is None
+
+
+def test_cost_calc_uses_enriched_tokens():
+    """Cost calculation uses tokens enriched from response payload."""
+    record = _make_record(
+        model="gpt-4",
+        custom_llm_provider="openai",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        response={
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+            },
+        },
+    )
+    cost = _calculate_cost_for_record(record)
+    assert cost > 0, f"Expected non-zero cost after enrichment, got {cost}"
+
+
+def test_cost_calc_uses_enriched_n_for_images():
+    """Image cost uses n enriched from response.data."""
+    record = _make_record(
+        call_type="image_generation",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        n=None,
+        size="1024x1024",
+        response={"data": [{"url": "a.png"}, {"url": "b.png"}]},
+    )
+    with patch(
+        "litellm.proxy.spend_tracking.spend_record_endpoint.completion_cost",
+        return_value=0.02,
+    ) as mock_cc:
+        cost = _calculate_cost_for_record(record)
+        assert cost == 0.02
+        # n should have been enriched to 2
+        assert record.n == 2
+        cr = mock_cc.call_args.kwargs["completion_response"]
+        from litellm.types.utils import ImageResponse
+
+        assert isinstance(cr, ImageResponse)
+        assert len(cr.data) == 2
 
 
 # ---------------------------------------------------------------------------
