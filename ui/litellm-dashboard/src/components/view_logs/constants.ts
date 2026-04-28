@@ -18,6 +18,12 @@ export const MCP_CALL_TYPES = ["call_mcp_tool", "list_mcp_tools"];
 /** Call types that represent agent/A2A requests (e.g. asend_message). */
 export const AGENT_CALL_TYPES = ["asend_message"];
 
+/** Call types that represent image generation/editing. */
+export const IMAGE_CALL_TYPES = ["image_generation", "aimage_generation", "image_edit", "aimage_edit"];
+
+/** Call types that represent video generation. */
+export const VIDEO_CALL_TYPES = ["video_generation", "create_video", "acreate_video", "video_remix", "avideo_remix"];
+
 export const QUICK_SELECT_OPTIONS: { label: string; value: number; unit: string }[] = [
   { label: "Last 15 Minutes", value: 15, unit: "minutes" },
   { label: "Last Hour", value: 1, unit: "hours" },

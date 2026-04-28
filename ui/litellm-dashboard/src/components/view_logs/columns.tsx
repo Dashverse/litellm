@@ -6,8 +6,8 @@ import React, { useState } from "react";
 import { getProviderLogoAndName } from "../provider_info_helpers";
 import { TableHeaderSortDropdown } from "../common_components/TableHeaderSortDropdown/TableHeaderSortDropdown";
 import { TimeCell } from "./time_cell";
-import { AGENT_CALL_TYPES, MCP_CALL_TYPES } from "./constants";
-import { AgentBadge, AgentIcon, LlmBadge, McpBadge, SparkleIcon, WrenchIcon } from "./TypeBadges";
+import { AGENT_CALL_TYPES, IMAGE_CALL_TYPES, MCP_CALL_TYPES, VIDEO_CALL_TYPES } from "./constants";
+import { AgentBadge, AgentIcon, ImageBadge, LlmBadge, McpBadge, SparkleIcon, VideoBadge, WrenchIcon } from "./TypeBadges";
 
 /** API sort field mapping for /spend/logs/ui endpoint */
 export const LOGS_SORT_FIELD_MAP = {
@@ -127,12 +127,16 @@ export const createColumns = (sortProps?: LogsSortProps): ColumnDef<LogEntry>[] 
       const sessionCount = row.session_total_count || 1;
       const isMcp = MCP_CALL_TYPES.includes(row.call_type);
       const isAgent = AGENT_CALL_TYPES.includes(row.call_type);
+      const isImage = IMAGE_CALL_TYPES.includes(row.call_type);
+      const isVideo = VIDEO_CALL_TYPES.includes(row.call_type);
       const sessionLlmCount = row.session_llm_count ?? (isMcp || isAgent ? 0 : sessionCount);
       const sessionAgentCount = row.session_agent_count ?? (isAgent ? sessionCount : 0);
       const sessionMcpCount = row.session_mcp_count ?? (isMcp ? sessionCount : 0);
 
       if (isMcp) return <McpBadge />;
       if (isAgent && sessionCount <= 1) return <AgentBadge />;
+      if (isImage) return <ImageBadge />;
+      if (isVideo) return <VideoBadge />;
       if (sessionCount <= 1) return <LlmBadge />;
 
       // Multi-call session — show total count, plus Agent/MCP indicators when mixed.
