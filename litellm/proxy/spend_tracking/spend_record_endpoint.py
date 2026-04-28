@@ -218,6 +218,10 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
     if record.spend is not None:
         return record.spend
 
+    # Failed requests should not incur cost
+    if record.status == "failure":
+        return 0.0
+
     # Enrich record fields from raw request/response payloads
     _enrich_record_from_payloads(record)
 
