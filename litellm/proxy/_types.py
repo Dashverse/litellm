@@ -3358,6 +3358,9 @@ class SpendRecordRequest(LiteLLMPydanticObjectBase):
     quality: Optional[str] = None
     n: Optional[int] = None
 
+    # Video generation calls
+    duration_seconds: Optional[float] = None
+
     # Full request & response bodies (stored for log viewer, used for cost calc)
     request: Optional[Union[str, list, dict]] = None
     response: Optional[Union[str, list, dict]] = None

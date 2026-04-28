@@ -34,6 +34,14 @@ _IMAGE_CALL_TYPES = {
     "aimage_edit",
 }
 
+_VIDEO_CALL_TYPES = {
+    "video_generation",
+    "create_video",
+    "acreate_video",
+    "video_remix",
+    "avideo_remix",
+}
+
 # Map FAL named image sizes to pixel dimensions
 _FAL_SIZE_MAP = {
     "square_hd": "1024x1024",
@@ -102,6 +110,22 @@ def _enrich_record_from_payloads(record: SpendRecordRequest) -> None:
         if quality_val:
             record.quality = str(quality_val)
 
+    # --- Video duration from request body ---
+    if record.duration_seconds is None and record.call_type in _VIDEO_CALL_TYPES:
+        # Try common field names used by video providers:
+        #   "duration" (BytePlus, Kling, FAL), "seconds" (Azure Sora),
+        #   "durationSeconds" in nested "params" (VEO/Vertex AI)
+        dur_val = req.get("duration") or req.get("seconds")
+        if dur_val is None:
+            params = req.get("params") or req.get("parameters") or {}
+            if isinstance(params, dict):
+                dur_val = params.get("durationSeconds") or params.get("duration_seconds")
+        if dur_val is not None:
+            try:
+                record.duration_seconds = float(dur_val)
+            except (ValueError, TypeError):
+                pass
+
 
 def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
     """Return the spend for a record, using caller-provided value or computing via completion_cost()."""
@@ -114,6 +138,8 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
     try:
         completion_response: Any = None
 
+        # Resolve the call_type to one that completion_cost recognizes
+        effective_call_type = record.call_type
         if record.call_type in _IMAGE_CALL_TYPES:
             # Build a synthetic ImageResponse so completion_cost's isinstance check passes
             n = record.n or 1
@@ -125,6 +151,15 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
                 completion_response.size = record.size
             if record.quality:
                 completion_response.quality = record.quality
+        elif record.call_type in _VIDEO_CALL_TYPES:
+            # Build a dict with usage.duration_seconds for video cost calculation
+            duration = record.duration_seconds or 0.0
+            completion_response = {
+                "usage": {"duration_seconds": duration},
+                "model": record.model,
+            }
+            # completion_cost expects "create_video" in its _VIDEO_CALL_TYPES
+            effective_call_type = "create_video"
         else:
             # Build a dict with usage info for token-based calls
             completion_response = {
@@ -140,7 +175,7 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
             completion_response=completion_response,
             model=record.model,
             custom_llm_provider=record.custom_llm_provider,
-            call_type=record.call_type,
+            call_type=effective_call_type,
             size=record.size,
             quality=record.quality,
             n=record.n,
