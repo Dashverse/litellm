@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -40,6 +41,56 @@ _VIDEO_CALL_TYPES = {
     "acreate_video",
     "video_remix",
     "avideo_remix",
+}
+
+# Map BytePlus ARK endpoint IDs to canonical model names
+_BYTEPLUS_ARK_MODEL_MAP = {
+    "dreamina-seedance-2-0-260128": "seedance-2.0",
+    "dreamina-seedance-2-0-fast-260128": "seedance-2.0-fast",
+    "ep-20260130153806-lrrh6": "seedance-v1.5-pro",
+}
+
+# BytePlus video: token-based pricing (USD per token)
+_BYTEPLUS_COST_PER_TOKEN: dict[str, float] = {
+    "seedance-2.0": 0.000007,
+    "seedance-2.0-fast": 0.0000056,
+    "seedance-v1.5-pro": 0.0000025,
+}
+
+# Local per-second pricing for video models not in the upstream cost map.
+# Key: (provider, canonical_model, mode, has_audio) → USD per second.
+_VIDEO_COST_PER_SECOND: dict[tuple[str, str, str, bool], float] = {
+    # --- Kling direct API ---
+    # Kling 3.0
+    ("kling", "kling-v3", "pro", False): 0.08,
+    ("kling", "kling-v3", "pro", True): 0.12,
+    ("kling", "kling-v3", "std", False): 0.06,
+    ("kling", "kling-v3", "std", True): 0.10,
+    # Kling o3
+    ("kling", "kling-v3-omni", "pro", False): 0.08,
+    ("kling", "kling-v3-omni", "pro", True): 0.10,
+    ("kling", "kling-v3-omni", "std", False): 0.06,
+    ("kling", "kling-v3-omni", "std", True): 0.08,
+    # Kling 2.6
+    ("kling", "kling-v2-6", "pro", False): 0.08,
+    ("kling", "kling-v2-6", "pro", True): 0.12,
+    # Kling 2.1
+    ("kling", "kling-v2-1", "std", False): 0.05,
+    ("kling", "kling-v2-1", "std", True): 0.06,
+    ("kling", "kling-v2-1", "pro", False): 0.098,
+    ("kling", "kling-v2-1", "master", False): 0.20,
+    ("kling", "kling-v2-1", "master", True): 0.24,
+    # --- VEO (Vertex AI) ---
+    ("vertex_ai", "veo-3.1-fast-generate-001", "default", False): 0.10,
+    ("vertex_ai", "veo-3.1-fast-generate-001", "default", True): 0.15,
+    ("vertex_ai", "veo-3.1-generate-001", "default", False): 0.10,
+    ("vertex_ai", "veo-3.1-generate-001", "default", True): 0.15,
+    ("vertex_ai", "veo-3.0-fast-generate-001", "default", False): 0.10,
+    ("vertex_ai", "veo-3.0-fast-generate-001", "default", True): 0.15,
+    ("vertex_ai", "veo-3.0-generate-001", "default", False): 0.10,
+    ("vertex_ai", "veo-3.0-generate-001", "default", True): 0.15,
+    ("vertex_ai", "veo-2.0-generate-001", "default", False): 0.10,
+    ("vertex_ai", "veo-2.0-generate-001", "default", True): 0.15,
 }
 
 # Map FAL named image sizes to pixel dimensions
@@ -119,12 +170,47 @@ def _enrich_record_from_payloads(record: SpendRecordRequest) -> None:
         if dur_val is None:
             params = req.get("params") or req.get("parameters") or {}
             if isinstance(params, dict):
-                dur_val = params.get("durationSeconds") or params.get("duration_seconds")
+                dur_val = params.get("durationSeconds") or params.get(
+                    "duration_seconds"
+                )
         if dur_val is not None:
             try:
                 record.duration_seconds = float(dur_val)
             except (ValueError, TypeError):
                 pass
+
+
+def _extract_video_cost_key(
+    record: SpendRecordRequest,
+) -> tuple[str, str, str, bool]:
+    """Return (provider, canonical_model, mode, has_audio) for local pricing lookup."""
+    req = record.request if isinstance(record.request, dict) else {}
+    provider = record.custom_llm_provider or ""
+
+    # Resolve canonical model name (strip provider prefix)
+    if provider == "byteplus":
+        raw = record.model.removeprefix("byteplus/")
+        canonical = _BYTEPLUS_ARK_MODEL_MAP.get(raw, raw)
+    elif provider == "kling":
+        canonical = record.model.removeprefix("kling/")
+    elif provider == "vertex_ai":
+        canonical = record.model.removeprefix("vertex_ai/")
+    else:
+        canonical = (
+            record.model.split("/", 1)[-1] if "/" in record.model else record.model
+        )
+
+    # Extract mode (Kling uses "mode" field; default for other providers)
+    mode = req.get("mode", "default")
+
+    # Extract audio flag
+    has_audio = False
+    if req.get("generate_audio") is True:  # BytePlus
+        has_audio = True
+    elif req.get("sound") in ("on", True, "true"):  # Kling
+        has_audio = True
+
+    return (provider, canonical, mode, has_audio)
 
 
 def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
@@ -136,10 +222,12 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
     _enrich_record_from_payloads(record)
 
     try:
-        completion_response: Any = None
+        if record.call_type in _VIDEO_CALL_TYPES:
+            return _calculate_video_cost(record)
 
-        # Resolve the call_type to one that completion_cost recognizes
+        completion_response: Any = None
         effective_call_type = record.call_type
+
         if record.call_type in _IMAGE_CALL_TYPES:
             # Build a synthetic ImageResponse so completion_cost's isinstance check passes
             n = record.n or 1
@@ -151,15 +239,6 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
                 completion_response.size = record.size
             if record.quality:
                 completion_response.quality = record.quality
-        elif record.call_type in _VIDEO_CALL_TYPES:
-            # Build a dict with usage.duration_seconds for video cost calculation
-            duration = record.duration_seconds or 0.0
-            completion_response = {
-                "usage": {"duration_seconds": duration},
-                "model": record.model,
-            }
-            # completion_cost expects "create_video" in its _VIDEO_CALL_TYPES
-            effective_call_type = "create_video"
         else:
             # Build a dict with usage info for token-based calls
             completion_response = {
@@ -188,6 +267,45 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
             str(e),
         )
         return 0.0
+
+
+def _calculate_video_cost(record: SpendRecordRequest) -> float:
+    """Calculate cost for video generation calls.
+
+    Provider-specific strategies:
+    - BytePlus: token-based pricing via completion_cost() with mapped model name
+    - Kling/VEO: per-second pricing from local _VIDEO_COST_PER_SECOND table
+    - Others (Sora, etc.): fallback to completion_cost() with duration_seconds
+    """
+    # --- BytePlus: token-based pricing ---
+    if record.custom_llm_provider == "byteplus":
+        raw = record.model.removeprefix("byteplus/")
+        canonical = _BYTEPLUS_ARK_MODEL_MAP.get(raw, raw)
+        cost_per_token = _BYTEPLUS_COST_PER_TOKEN.get(canonical)
+        if cost_per_token is not None:
+            prompt_cost = record.prompt_tokens * cost_per_token
+            completion_cost_val = record.completion_tokens * cost_per_token
+            return prompt_cost + completion_cost_val
+
+    # --- Kling / VEO: per-second from local pricing table ---
+    key = _extract_video_cost_key(record)
+    rate = _VIDEO_COST_PER_SECOND.get(key)
+    if rate is not None:
+        duration = record.duration_seconds or 0.0
+        return rate * duration
+
+    # --- Fallback: completion_cost() for models in upstream cost map (Sora, etc.) ---
+    duration = record.duration_seconds or 0.0
+    completion_response = SimpleNamespace(
+        usage={"duration_seconds": duration},
+        model=record.model,
+    )
+    return completion_cost(
+        completion_response=completion_response,
+        model=record.model,
+        custom_llm_provider=record.custom_llm_provider,
+        call_type="create_video",
+    )
 
 
 def _build_spend_log_payload(
