@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -152,12 +153,13 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
             if record.quality:
                 completion_response.quality = record.quality
         elif record.call_type in _VIDEO_CALL_TYPES:
-            # Build a dict with usage.duration_seconds for video cost calculation
+            # Build an object with a .usage attribute so getattr() in
+            # cost_calculator.py can find duration_seconds.
             duration = record.duration_seconds or 0.0
-            completion_response = {
-                "usage": {"duration_seconds": duration},
-                "model": record.model,
-            }
+            completion_response = SimpleNamespace(
+                usage={"duration_seconds": duration},
+                model=record.model,
+            )
             # completion_cost expects "create_video" in its _VIDEO_CALL_TYPES
             effective_call_type = "create_video"
         else:
