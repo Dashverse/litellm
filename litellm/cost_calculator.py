@@ -1946,7 +1946,13 @@ def default_image_cost_calculator(
         and cost_info["input_cost_per_image"] is not None
     ):
         return cost_info["input_cost_per_image"] * n
-    # Priority 2: Fall back to per-pixel pricing for backward compatibility
+    # Priority 2: output_cost_per_image (e.g. gpt-image-2)
+    elif (
+        "output_cost_per_image" in cost_info
+        and cost_info["output_cost_per_image"] is not None
+    ):
+        return cost_info["output_cost_per_image"] * n
+    # Priority 3: Fall back to per-pixel pricing for backward compatibility
     elif (
         "input_cost_per_pixel" in cost_info
         and cost_info["input_cost_per_pixel"] is not None

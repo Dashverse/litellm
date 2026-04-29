@@ -59,27 +59,37 @@ _BYTEPLUS_COST_PER_TOKEN: dict[str, float] = {
 
 # Local per-second pricing for video models not in the upstream cost map.
 # Key: (provider, canonical_model, mode, has_audio) → USD per second.
+# Kling has tiered per-second pricing: 1s clips cost ~2x vs 5s+ clips.
+# Tuple: (short_rate, long_rate) — short = ≤2s, long = ≥3s.
+_KLING_TIERED_RATES: dict[tuple[str, str, str, bool], tuple[float, float]] = {
+    # Kling V3 — https://app.klingai.com/global/dev/pricing
+    ("kling", "kling-v3", "std", False): (0.084, 0.042),
+    ("kling", "kling-v3", "std", True): (0.126, 0.126),    # no 5s+ std+audio listed
+    ("kling", "kling-v3", "pro", False): (0.112, 0.07),
+    ("kling", "kling-v3", "pro", True): (0.168, 0.14),
+    # Kling V3-Omni (no-video-input rates)
+    ("kling", "kling-v3-omni", "std", False): (0.084, 0.084),
+    ("kling", "kling-v3-omni", "std", True): (0.112, 0.112),
+    ("kling", "kling-v3-omni", "pro", False): (0.112, 0.112),
+    ("kling", "kling-v3-omni", "pro", True): (0.14, 0.14),
+    # Kling Video-O1
+    ("kling", "kling-video-o1", "std", False): (0.084, 0.084),
+    ("kling", "kling-video-o1", "pro", False): (0.112, 0.112),
+    # Kling V2-6
+    ("kling", "kling-v2-6", "pro", False): (0.112, 0.07),
+    ("kling", "kling-v2-6", "pro", True): (0.168, 0.14),
+    # Kling V2-1
+    ("kling", "kling-v2-1", "std", False): (0.084, 0.042),
+    ("kling", "kling-v2-1", "std", True): (0.06, 0.06),
+    ("kling", "kling-v2-1", "pro", False): (0.112, 0.07),
+    ("kling", "kling-v2-1", "master", False): (0.28, 0.28),
+    ("kling", "kling-v2-1", "master", True): (0.28, 0.28),
+}
+
+# Threshold: clips ≤ this duration use the short (1s) rate.
+_KLING_SHORT_CLIP_THRESHOLD = 2.0
+
 _VIDEO_COST_PER_SECOND: dict[tuple[str, str, str, bool], float] = {
-    # --- Kling direct API ---
-    # Kling 3.0
-    ("kling", "kling-v3", "pro", False): 0.08,
-    ("kling", "kling-v3", "pro", True): 0.12,
-    ("kling", "kling-v3", "std", False): 0.06,
-    ("kling", "kling-v3", "std", True): 0.10,
-    # Kling o3
-    ("kling", "kling-v3-omni", "pro", False): 0.08,
-    ("kling", "kling-v3-omni", "pro", True): 0.10,
-    ("kling", "kling-v3-omni", "std", False): 0.06,
-    ("kling", "kling-v3-omni", "std", True): 0.08,
-    # Kling 2.6
-    ("kling", "kling-v2-6", "pro", False): 0.08,
-    ("kling", "kling-v2-6", "pro", True): 0.12,
-    # Kling 2.1
-    ("kling", "kling-v2-1", "std", False): 0.05,
-    ("kling", "kling-v2-1", "std", True): 0.06,
-    ("kling", "kling-v2-1", "pro", False): 0.098,
-    ("kling", "kling-v2-1", "master", False): 0.20,
-    ("kling", "kling-v2-1", "master", True): 0.24,
     # --- VEO (Vertex AI) ---
     ("vertex_ai", "veo-3.1-fast-generate-001", "default", False): 0.10,
     ("vertex_ai", "veo-3.1-fast-generate-001", "default", True): 0.15,
@@ -92,6 +102,42 @@ _VIDEO_COST_PER_SECOND: dict[tuple[str, str, str, bool], float] = {
     ("vertex_ai", "veo-2.0-generate-001", "default", False): 0.10,
     ("vertex_ai", "veo-2.0-generate-001", "default", True): 0.15,
 }
+
+# GPT Image 2 per-image pricing by (quality, size_bucket).
+# "square" = 1024x1024 (≤1M pixels), "rect" = 1024x1536 or 1536x1024 (>1M pixels).
+_GPT_IMAGE_2_COST: dict[tuple[str, str], float] = {
+    ("low", "square"): 0.006,
+    ("low", "rect"): 0.005,
+    ("medium", "square"): 0.053,
+    ("medium", "rect"): 0.041,
+    ("high", "square"): 0.211,
+    ("high", "rect"): 0.165,
+}
+_GPT_IMAGE_2_SQUARE_THRESHOLD = 1024 * 1024  # pixels
+
+
+def _calculate_gpt_image_2_cost(record: "SpendRecordRequest") -> Optional[float]:
+    """Return per-image cost for gpt-image-2, or None if not applicable."""
+    canonical = record.model.split("/")[-1] if "/" in record.model else record.model
+    if canonical != "gpt-image-2":
+        return None
+    quality = (record.quality or "medium").lower()
+    n = record.n or 1
+    # Determine size bucket from pixel area
+    bucket = "square"
+    if record.size:
+        try:
+            w, h = record.size.replace("-x-", "x").split("x")
+            if int(w) * int(h) > _GPT_IMAGE_2_SQUARE_THRESHOLD:
+                bucket = "rect"
+        except (ValueError, AttributeError):
+            pass
+    cost_per_image = _GPT_IMAGE_2_COST.get((quality, bucket))
+    if cost_per_image is None:
+        # Unknown quality — fall back to medium
+        cost_per_image = _GPT_IMAGE_2_COST.get(("medium", bucket), 0.053)
+    return cost_per_image * n
+
 
 # Map FAL named image sizes to pixel dimensions
 _FAL_SIZE_MAP = {
@@ -233,6 +279,11 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
         effective_call_type = record.call_type
 
         if record.call_type in _IMAGE_CALL_TYPES:
+            # Try local pricing tables first (gpt-image-2, etc.)
+            local_image_cost = _calculate_gpt_image_2_cost(record)
+            if local_image_cost is not None:
+                return local_image_cost
+
             # Build a synthetic ImageResponse so completion_cost's isinstance check passes
             n = record.n or 1
             completion_response = ImageResponse(
@@ -291,8 +342,16 @@ def _calculate_video_cost(record: SpendRecordRequest) -> float:
             completion_cost_val = record.completion_tokens * cost_per_token
             return prompt_cost + completion_cost_val
 
-    # --- Kling / VEO: per-second from local pricing table ---
+    # --- Kling: tiered per-second pricing (short vs long clips) ---
     key = _extract_video_cost_key(record)
+    tiered = _KLING_TIERED_RATES.get(key)
+    if tiered is not None:
+        duration = record.duration_seconds or 0.0
+        short_rate, long_rate = tiered
+        rate = short_rate if duration <= _KLING_SHORT_CLIP_THRESHOLD else long_rate
+        return rate * duration
+
+    # --- VEO / other: flat per-second from local pricing table ---
     rate = _VIDEO_COST_PER_SECOND.get(key)
     if rate is not None:
         duration = record.duration_seconds or 0.0
