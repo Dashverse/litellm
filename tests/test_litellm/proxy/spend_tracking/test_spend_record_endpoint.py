@@ -19,7 +19,6 @@ from litellm.proxy.spend_tracking.spend_record_endpoint import (
     _is_duplicate_request_id,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -367,6 +366,142 @@ def test_cost_calc_uses_enriched_n_for_images():
 
         assert isinstance(cr, ImageResponse)
         assert len(cr.data) == 2
+
+
+# ---------------------------------------------------------------------------
+# Audio cost calculation tests (TTS + STT)
+# ---------------------------------------------------------------------------
+
+
+def test_cost_calc_tts_character_based_uses_padded_prompt():
+    """TTS character-priced models (tts-1) — char count from response['characters']
+    is converted to a non-whitespace prompt of that length, since completion_cost
+    derives prompt_characters via _count_characters(text=prompt)."""
+    record = _make_record(
+        model="tts-1",
+        call_type="aspeech",
+        custom_llm_provider="openai",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        response={"characters": 42},
+    )
+    with patch(
+        "litellm.proxy.spend_tracking.spend_record_endpoint.completion_cost",
+        return_value=0.00063,
+    ) as mock_cc:
+        cost = _calculate_cost_for_record(record)
+        assert cost == 0.00063
+        call_kwargs = mock_cc.call_args.kwargs
+        assert call_kwargs["call_type"] == "aspeech"
+        prompt = call_kwargs["prompt"]
+        assert len(prompt) == 42
+        assert prompt.strip() == prompt  # no whitespace — survives _count_characters
+
+
+def test_cost_calc_tts_token_based_passes_usage():
+    """TTS token-priced models (gpt-4o-mini-tts) — usage dict flows through."""
+    record = _make_record(
+        model="gpt-4o-mini-tts",
+        call_type="aspeech",
+        custom_llm_provider="openai",
+        prompt_tokens=10,
+        completion_tokens=50,
+        total_tokens=60,
+        response={"characters": 0},
+    )
+    with patch(
+        "litellm.proxy.spend_tracking.spend_record_endpoint.completion_cost",
+        return_value=0.0007,
+    ) as mock_cc:
+        cost = _calculate_cost_for_record(record)
+        assert cost == 0.0007
+        cr = mock_cc.call_args.kwargs["completion_response"]
+        assert cr["usage"]["prompt_tokens"] == 10
+        assert cr["usage"]["completion_tokens"] == 50
+
+
+def test_cost_calc_tts_missing_characters_uses_zero_length_prompt():
+    """TTS with no `characters` in response should not raise; passes empty prompt."""
+    record = _make_record(
+        model="tts-1",
+        call_type="aspeech",
+        custom_llm_provider="openai",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        response={},
+    )
+    with patch(
+        "litellm.proxy.spend_tracking.spend_record_endpoint.completion_cost",
+        return_value=0.0,
+    ) as mock_cc:
+        cost = _calculate_cost_for_record(record)
+        assert cost == 0.0
+        assert mock_cc.call_args.kwargs["prompt"] == ""
+
+
+def test_cost_calc_stt_duration_based_builds_transcription_response():
+    """STT duration-priced models (whisper-1) — TranscriptionResponse with .duration."""
+    from litellm.types.utils import TranscriptionResponse
+
+    record = _make_record(
+        model="whisper-1",
+        call_type="atranscription",
+        custom_llm_provider="openai",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        duration_seconds=10.0,
+    )
+    with patch(
+        "litellm.proxy.spend_tracking.spend_record_endpoint.completion_cost",
+        return_value=0.001,
+    ) as mock_cc:
+        cost = _calculate_cost_for_record(record)
+        assert cost == 0.001
+        cr = mock_cc.call_args.kwargs["completion_response"]
+        assert isinstance(cr, TranscriptionResponse)
+        assert cr.duration == 10.0
+        assert mock_cc.call_args.kwargs["call_type"] == "atranscription"
+
+
+def test_cost_calc_stt_token_based_passes_usage():
+    """STT token-priced models (gpt-4o-transcribe) — TranscriptionResponse with Usage."""
+    from litellm.types.utils import TranscriptionResponse, Usage
+
+    record = _make_record(
+        model="gpt-4o-transcribe",
+        call_type="atranscription",
+        custom_llm_provider="openai",
+        prompt_tokens=14,
+        completion_tokens=45,
+        total_tokens=59,
+    )
+    with patch(
+        "litellm.proxy.spend_tracking.spend_record_endpoint.completion_cost",
+        return_value=0.00054,
+    ) as mock_cc:
+        cost = _calculate_cost_for_record(record)
+        assert cost == 0.00054
+        cr = mock_cc.call_args.kwargs["completion_response"]
+        assert isinstance(cr, TranscriptionResponse)
+        assert isinstance(cr.usage, Usage)
+        assert cr.usage.prompt_tokens == 14
+        assert cr.usage.completion_tokens == 45
+
+
+def test_enrich_stt_duration_from_response():
+    """STT duration_seconds extracted from response.duration when not set."""
+    record = _make_record(
+        call_type="atranscription",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        response={"duration": 42.7, "text": "hello there"},
+    )
+    _enrich_record_from_payloads(record)
+    assert record.duration_seconds == 42.7
 
 
 # ---------------------------------------------------------------------------

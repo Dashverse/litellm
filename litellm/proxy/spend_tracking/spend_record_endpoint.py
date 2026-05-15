@@ -19,7 +19,12 @@ from litellm.proxy._types import (
     UserAPIKeyAuth,
 )
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
-from litellm.types.utils import ImageObject, ImageResponse
+from litellm.types.utils import (
+    ImageObject,
+    ImageResponse,
+    TranscriptionResponse,
+    Usage,
+)
 
 if TYPE_CHECKING:
     from litellm.proxy.proxy_server import PrismaClient
@@ -43,6 +48,10 @@ _VIDEO_CALL_TYPES = {
     "avideo_remix",
 }
 
+_SPEECH_CALL_TYPES = {"speech", "aspeech"}
+_TRANSCRIPTION_CALL_TYPES = {"transcription", "atranscription"}
+_AUDIO_CALL_TYPES = _SPEECH_CALL_TYPES | _TRANSCRIPTION_CALL_TYPES
+
 # Map BytePlus ARK endpoint IDs to canonical model names
 _BYTEPLUS_ARK_MODEL_MAP = {
     "dreamina-seedance-2-0-260128": "seedance-2.0",
@@ -64,7 +73,7 @@ _BYTEPLUS_COST_PER_TOKEN: dict[str, float] = {
 _KLING_TIERED_RATES: dict[tuple[str, str, str, bool], tuple[float, float]] = {
     # Kling V3 — https://app.klingai.com/global/dev/pricing
     ("kling", "kling-v3", "std", False): (0.084, 0.042),
-    ("kling", "kling-v3", "std", True): (0.126, 0.126),    # no 5s+ std+audio listed
+    ("kling", "kling-v3", "std", True): (0.126, 0.126),  # no 5s+ std+audio listed
     ("kling", "kling-v3", "pro", False): (0.112, 0.07),
     ("kling", "kling-v3", "pro", True): (0.168, 0.14),
     # Kling V3-Omni (no-video-input rates)
@@ -150,7 +159,7 @@ _FAL_SIZE_MAP = {
 }
 
 
-def _enrich_record_from_payloads(record: SpendRecordRequest) -> None:
+def _enrich_record_from_payloads(record: SpendRecordRequest) -> None:  # noqa: PLR0915
     """Extract tokens, n, size, quality from request/response bodies when not set explicitly.
 
     Mutates the record in-place so _calculate_cost_for_record can use the enriched fields.
@@ -225,6 +234,18 @@ def _enrich_record_from_payloads(record: SpendRecordRequest) -> None:
             except (ValueError, TypeError):
                 pass
 
+    # --- Transcription duration from response body ---
+    if (
+        record.duration_seconds is None
+        and record.call_type in _TRANSCRIPTION_CALL_TYPES
+    ):
+        dur_val = resp.get("duration")
+        if dur_val is not None:
+            try:
+                record.duration_seconds = float(dur_val)
+            except (ValueError, TypeError):
+                pass
+
 
 def _extract_video_cost_key(
     record: SpendRecordRequest,
@@ -274,6 +295,9 @@ def _calculate_cost_for_record(record: SpendRecordRequest) -> float:
     try:
         if record.call_type in _VIDEO_CALL_TYPES:
             return _calculate_video_cost(record)
+
+        if record.call_type in _AUDIO_CALL_TYPES:
+            return _calculate_audio_cost(record)
 
         completion_response: Any = None
         effective_call_type = record.call_type
@@ -368,6 +392,67 @@ def _calculate_video_cost(record: SpendRecordRequest) -> float:
         model=record.model,
         custom_llm_provider=record.custom_llm_provider,
         call_type="create_video",
+    )
+
+
+def _calculate_audio_cost(record: SpendRecordRequest) -> float:
+    """Calculate cost for TTS (speech/aspeech) and STT (transcription/atranscription).
+
+    Delegates to completion_cost(), which selects char-/token-/duration-based
+    pricing per model via select_cost_metric_for_model().
+    """
+    resp = record.response if isinstance(record.response, dict) else {}
+
+    if record.call_type in _SPEECH_CALL_TYPES:
+        # TTS: upstream wraps the response with a `characters` count of the
+        # synthesized input. completion_cost derives prompt_characters by
+        # counting non-whitespace chars in `prompt`, so pad a string of that
+        # length. Pass usage too so token-priced models (gpt-4o-mini-tts) work.
+        try:
+            characters = int(resp.get("characters") or 0)
+        except (TypeError, ValueError):
+            characters = 0
+        padded_prompt = "a" * characters
+        completion_response: Any = {
+            "usage": {
+                "prompt_tokens": record.prompt_tokens,
+                "completion_tokens": record.completion_tokens,
+                "total_tokens": record.total_tokens,
+            },
+            "model": record.model,
+        }
+        return completion_cost(
+            completion_response=completion_response,
+            model=record.model,
+            custom_llm_provider=record.custom_llm_provider,
+            call_type=record.call_type,
+            prompt=padded_prompt,
+        )
+
+    # STT
+    transcription_response = TranscriptionResponse(text="")
+    # If the caller passed a full usage dict (with details like
+    # prompt_tokens_details.audio_tokens), preserve it so audio-token pricing
+    # works for token-priced models like gpt-4o-transcribe.
+    raw_usage = resp.get("usage") if isinstance(resp, dict) else None
+    if isinstance(raw_usage, dict) and (
+        raw_usage.get("prompt_tokens") or raw_usage.get("completion_tokens")
+    ):
+        transcription_response.usage = Usage(**raw_usage)
+    elif record.prompt_tokens > 0 or record.completion_tokens > 0:
+        transcription_response.usage = Usage(
+            prompt_tokens=record.prompt_tokens,
+            completion_tokens=record.completion_tokens,
+            total_tokens=record.total_tokens,
+        )
+    else:
+        # Duration-priced (whisper-1) — cost_calculator reads .duration
+        transcription_response.duration = record.duration_seconds or 0.0
+    return completion_cost(
+        completion_response=transcription_response,
+        model=record.model,
+        custom_llm_provider=record.custom_llm_provider,
+        call_type=record.call_type,
     )
 
 
